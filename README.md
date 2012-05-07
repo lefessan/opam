@@ -1,4 +1,6 @@
-OPAM - A package manager for OCaml
+# OPAM
+
+OPAM - A PAckage Manager for Ocaml
 
 *Warning* do not use this software in production, it is not yet stable
 

@@ -135,6 +135,23 @@ sig
   (** package configuration for compile and link options *)
   (* XXX: P.config should be installed in their own path *)
   val pconfig : t -> name_version -> filename (* $HOME_OPAM/OVERSION/build/NAME-VERSION/NAME.config *)
+
+  (** Executes an arbitrary list of command inside "build/NAME-VERSION". 
+      For the [int], see [Sys.command]. 
+      In particular, the execution continues as long as each command returns 0. *)
+  val exec : t -> name_version -> Run.command list -> int
+
+  (** Returns the exact path to give to the OCaml compiler (ie. -I ...) *)
+  val ocaml_options_of_library : t -> name -> string ocaml_options 
+  (* $HOME_OPAM/lib/NAME *)
+
+  (** directory that contains ocamlc, ocamlopt, ocamldep, ocamlbuild, ... *)
+  val ocaml : t -> filename
+  (* $HOME_OPAM/OVERSION/ocaml *)
+
+  (** temporary directory that can in particular contain extracted data *)
+  val ocaml_tmp : t -> filename
+  (* $HOME_OPAM/OVERSION/ocaml/_ *)
 end
 
 module type PATH =
@@ -175,8 +192,11 @@ sig
   val index : t -> name_version option -> filename (* $HOME_OPAM/index/NAME-VERSION.spec *)
   (* [None] : $HOME_OPAM/index *)
 
-  val compil : t -> string -> filename
+  val compil : t -> string (* [oversion] *) -> filename
   (* $HOME_OPAM/compilers/[oversion].compil *)
+
+  (** check if the $PATH contains a ocaml with the given version or if $HOME_OPAM/[oversion]/ocaml exist. *)
+  val is_ocaml_installed : t -> internal_version (* [oversion] *) -> bool
 
   (** list of spec files *)
   val index_list : t -> name_version list (* [ $HOME_OPAM/index/NAME-VERSION.spec ] -> [ NAME, VERSION ] *)
@@ -220,11 +240,11 @@ sig
       in the same directory as [filename] (which is also a directory). *)
   val to_archive : string (* archive name *) -> filename -> unit
 
-  (** Executes an arbitrary list of command inside "build/NAME-VERSION". 
+  (** Executes an arbitrary list of command inside [filename]. 
       For the [int], see [Sys.command]. 
       In particular, the execution continues as long as each command returns 0. *)
-  val exec : t -> name_version -> Run.command list -> int
-  
+  val exec : filename -> string list -> int
+
   (** see [Filename.dirname] *)
   val dirname : filename -> filename
 
@@ -245,10 +265,6 @@ sig
 
   (** [None] : not a directory *)
   val is_directory : filename -> raw_filename option
-
-  (** Returns the exact path to give to the OCaml compiler (ie. -I ...) *)
-  val ocaml_options_of_library : t -> name -> string ocaml_options 
-  (* $HOME_OPAM/lib/NAME *)
 
   val string_of_filename: filename -> string
 
@@ -306,17 +322,27 @@ module Path : PATH = struct
     let set_version t (Version ocaml_version) =
       { t with home_ocamlversion = Some (t.home // ocaml_version) }
 
-    let ocaml t = 
+    let ocamlv t = 
       match t.home_ocamlversion with
         | None -> Globals.error_and_exit "OCaml version has not been initialized."
         | Some v -> v
 
-    let lib t (Name n) = Raw (ocaml t // "lib" // n)
-    let bin t = Raw (ocaml t // "bin")
-    let installed t = Raw (ocaml t // "installed")
-    let build t = mk_name_version_o (ocaml t) "build" ""
+    let lib t (Name n) = Raw (ocamlv t // "lib" // n)
+    let bin t = Raw (ocamlv t // "bin")
+    let installed t = Raw (ocamlv t // "installed")
+    let build t = mk_name_version_o (ocamlv t) "build" ""
     let to_install t (n, v) = build t (Some (n, v)) /// B (Namespace.string_of_name n ^ ".install")
     let pconfig t (n, v) = build t (Some (n, v)) /// B (Namespace.string_of_name n ^ ".config")
+
+    let exec t n_v = 
+      Run.U.in_dir (s_of_filename (build t (Some n_v)))
+        (Run.System.With_ocaml.seq_env [s_of_filename (bin t)]) 
+
+    let ocaml_options_of_library t name = 
+      I (Printf.sprintf "%s" (s_of_filename (lib t name)))
+
+    let ocaml t = Raw (ocamlv t // "ocaml")
+    let ocaml_tmp t = Raw (ocamlv t // "ocaml" // "tmp")
   end
 
   include Base
@@ -341,6 +367,9 @@ module Path : PATH = struct
 
   let keys t n = Raw (t.home // "keys" // Namespace.string_of_name n)
   let hashes t n = Raw (t.home // "hashes" // Namespace.string_of_name n)
+
+  let is_ocaml_installed t (Version v) = 
+    Run.Ocamlc.version Run.Ocamlc.from_path = v || Sys.file_exists (t.home // v // "ocaml")
 
   let contents f_dir f_fic f_notfound f =
     let fic = s_of_filename f in
@@ -458,9 +487,9 @@ module Path : PATH = struct
 
     | Not_found s -> ()
 
-  let exec t n_v = 
-    Run.U.in_dir (s_of_filename (O.build t (Some n_v)))
-      (Run.System.With_ocaml.seq_env [s_of_filename (O.bin t)]) 
+  let exec path = 
+    Run.U.in_dir (s_of_filename path)
+      Run.System.Command.seq
 
   let basename s = B (Filename.basename (s_of_filename s))
 
@@ -597,9 +626,6 @@ module Path : PATH = struct
     with
       | 0 -> ()
       | _ -> failwith "tar creation failed"
-
-  let ocaml_options_of_library t name = 
-    I (Printf.sprintf "%s" (s_of_filename (O.lib t name)))
 
   let string_of_filename = s_of_filename
 

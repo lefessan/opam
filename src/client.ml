@@ -396,7 +396,7 @@ module Client : CLIENT = struct
     (* Call the build script and copy the output files *)
     let buildsh = File.Spec.make spec in
     log "Run %s" (File.Spec.string_of_command buildsh);
-    let err = Path.exec t.home nv buildsh in
+    let err = Path.O.exec t.home nv buildsh in
     if err = 0 then
       iter_toinstall Path.add_rec t nv
     else
@@ -776,7 +776,7 @@ module Client : CLIENT = struct
       | Some config -> File.PConfig.library_names config in
 
     let one (name, version) =
-      let path = match Path.ocaml_options_of_library t.home name with I s -> s in
+      let path = match Path.O.ocaml_options_of_library t.home name with I s -> s in
       match req with
       | Include -> Globals.msg "-I %s" path
       | Ocp     ->
@@ -878,24 +878,48 @@ module Client : CLIENT = struct
             server.hostname;
         update_config (List.filter ((!=) server) t.servers)
 
-  let switch name =
-    log "switch %s" name;
+  let switch name = failwith "TODO"
+(*    log "switch %s" name;
     let t = load_state () in
-    let compile compil =
-      failwith "TODO" in
-    if Filename.check_suffix name ".compil" then begin
-      (* we switch to a fresh OCaml install *)
-      let compil = File.Compil.parse (Run.U.read name) in
-      let name = File.Compil.name compil in
-      let compil_f = Path.compil t.home name in
-      if Path.file_exists compil_f then
-        Globals.error_and_exit "Compiler spec %s already exists" name;
-      File.Compil.add compil_f compil;
-      compile compil
-    end else begin
-      let compil_f = Path.compil t.home name in
-      let compil = File.Compil.find compil_f in
-      compile compil
-    end
-      
+    let config = File.Config.find_err (Path.config t.home) in
+    if File.Config.ocaml_version config = Version name then
+      Globals.msg "The version to change (%S) is the same as the one currently set" name
+    else
+      let set_compile compil =
+        let () = 
+          if Path.is_ocaml_installed t.home (Version name) then
+            ()
+          else
+            let t = { t with home = Path.O.set_version t.home (Version name) } in
+            let tmp = Path.O.ocaml_tmp t.home in
+            let () = 
+              Path.add_rec
+                tmp 
+                (Path.extract name (Links { sources = [ File.Compil.source compil ]
+                                          ; patches = File.Compil.patches compil })) in
+            let ocaml = Path.ocaml t.home (Version name) in
+            let () = 
+              exec t.home tmp
+                [ Printf.sprintf "./configure %s -prefix %s -bindir %s/bin -libdir %s/lib -mandir %s/man" (String.concat " " (File.Compil.configure compil)) ocaml
+                  (* NOTE In case it exists 2 '-prefix', in general the script ./configure will only consider the last one, others will be discarded. *)
+                ; Printf.sprintf "make %s" (String.concat " " (File.Compil.configure compil))
+                ; Printf.sprintf "make install" ] in
+            ()
+            in
+        File.Config.add (Path.config t.home) (File.Config.with_ocaml_version config (Version name)) in
+      if Filename.check_suffix name ".compil" then begin
+        (* we switch to a fresh OCaml install *)
+        let compil = File.Compil.parse (Run.U.read name) in
+        let name = File.Compil.name compil in
+        let compil_f = Path.compil t.home name in
+        if Path.file_exists compil_f then
+          Globals.error_and_exit "Compiler spec %s already exists" name;
+        File.Compil.add compil_f compil;
+        set_compile compil
+      end else begin
+        let compil_f = Path.compil t.home name in
+        let compil = File.Compil.find compil_f in
+        set_compile compil
+      end
+*)
 end

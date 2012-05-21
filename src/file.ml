@@ -159,6 +159,7 @@ struct
       t
 
     val with_sources : t -> url list -> t
+    val with_ocaml_version : t -> internal_version -> t
   end
 
   module Config : CONFIG =
@@ -178,6 +179,7 @@ struct
 
     let create version sources ocaml_version = { version ; sources ; ocaml_version }
     let with_sources t sources = { t with sources }
+    let with_ocaml_version t ocaml_version = { t with ocaml_version }
 
     let empty = {
       version = Globals.api_version;
@@ -747,7 +749,7 @@ make: %s
       | Some s -> List.map url (Parse.split_comma s) in
       let configure = match Parse.Exceptionless.assoc_parsed "configure" file with
       | None   -> []
-      | Some s -> Parse.split_comma s in
+      | Some s -> Parse.split_comma s in 
       let make = match Parse.Exceptionless.assoc_parsed "make" file with
       | None   -> []
       | Some s -> Parse.split_comma s in

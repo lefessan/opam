@@ -10,8 +10,8 @@ all: clone
 clone: cudf extlib ocaml-re ocamlgraph dose ocaml-arg
 
 cudf:
-	$(WGET) http://www.ocamlpro.com/pub/cudf.tar.bz2
-	tar xfj cudf.tar.bz2
+	$(WGET) http://www.ocamlpro.com/pub/cudf.tar.gz
+	tar xfz cudf.tar.gz
 
 extlib:
 	$(WGET) http://ocaml-extlib.googlecode.com/files/extlib-1.5.2.tar.gz;
@@ -19,12 +19,12 @@ extlib:
 	mv extlib-1.5.2 extlib
 
 dose:
-	$(WGET) http://www.ocamlpro.com/pub/dose.tar.bz2
-	tar xfj dose.tar.bz2
+	$(WGET) http://www.ocamlpro.com/pub/dose.tar.gz
+	tar xfz dose.tar.gz
 
 ocaml-arg:
-	$(WGET) http://www.ocamlpro.com/pub/ocaml-arg.tar.bz2
-	tar xfj ocaml-arg.tar.bz2
+	$(WGET) http://www.ocamlpro.com/pub/ocaml-arg.tar.gz
+	tar xfz ocaml-arg.tar.gz
 
 # ocaml-pcre:
 # 	$(WGET) http://hg.ocaml.info/release/pcre-ocaml/archive/release-6.2.5.tar.gz
@@ -37,8 +37,8 @@ ocamlgraph:
 	mv ocamlgraph-1.8.1 ocamlgraph
 
 ocaml-re:
-	$(WGET) http://www.ocamlpro.com/pub/ocaml-re.tar.bz2
-	tar xfj ocaml-re.tar.bz2
+	$(WGET) http://www.ocamlpro.com/pub/ocaml-re.tar.gz
+	tar xfz ocaml-re.tar.gz
 
 clean:
 	rm -rf *~

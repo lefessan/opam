@@ -600,7 +600,7 @@ let exec_download =
   | (Http|Https as uri), url ->
       (match Globals.os with
       | Globals.Darwin -> http "ftp"  (Uri.to_string (Some uri, url))
-      | _              -> http "wget" (Uri.to_string (Some uri, url)))
+      | _              -> http "wget --no-check-certificate" (Uri.to_string (Some uri, url)))
   | Git, repo -> clone repo
   | Local, _  -> assert false
 

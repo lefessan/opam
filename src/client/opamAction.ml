@@ -581,7 +581,6 @@ let build_and_install_package_aux t ~metadata nv =
 
       (* Exec the given commands. *)
       let exec name f =
-        Printf.eprintf "exec...\n%!";
         match OpamState.filter_commands t map  (f opam) with
         | []       -> ()
         | commands ->

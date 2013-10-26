@@ -2013,7 +2013,7 @@ let install_compiler t ~quiet switch compiler =
             ]
         end else begin
           let t = { t with switch } in
-          let compiler_s = OpamCompiler.to_string t.compiler in
+          let compiler_s = OpamCompiler.to_string compiler in
           let map = OpamVariable.Map.empty in
           let map = OpamVariable.Map.add
               compiler_v (OpamVariable.S compiler_s) map in

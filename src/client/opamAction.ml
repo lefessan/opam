@@ -520,6 +520,7 @@ let remove_all_packages t ~metadata sol =
 
 let snapshot_v = OpamVariable.of_string "SNAPSHOT"
 let package_v = OpamVariable.of_string "PACKAGE"
+let version_v = OpamVariable.of_string "VERSION"
 let depends_v = OpamVariable.of_string "DEPENDS"
 let hash_v = OpamVariable.of_string "HASH"
 let compiler_v = OpamVariable.of_string "COMPILER"
@@ -539,7 +540,8 @@ let package_variables t nv opam md5sum map =
         accu
     ) [] (OpamFile.OPAM.depends opam) in
   let depends_s = String.concat "," depends in
-  let package_s = OpamPackage.to_string nv in
+  let package_s = OpamPackage.(Name.to_string (name nv)) in
+  let version_s = OpamPackage.(Version.to_string (version nv)) in
   let hash_s = match md5sum with
            None -> "NOHASH"
          | Some md5sum -> Digest.to_hex md5sum in
@@ -552,6 +554,7 @@ let package_variables t nv opam md5sum map =
     snapshot_v, snapshot_s;
     depends_v, depends_s;
     package_v, package_s;
+    version_v, version_s;
     hash_v, hash_s;
     compiler_v, compiler_s;
   ] in

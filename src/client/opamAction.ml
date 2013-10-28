@@ -256,11 +256,9 @@ let extract_package t nv =
     let nv = OpamState.pinning_version t nv in
     match OpamState.download_archive t nv with
     | Some f ->
-      Printf.eprintf "arch_package\n%!";
       OpamFilename.extract f build_dir;
       Some (Digest.file (OpamFilename.to_string f))
     | None   ->
-      Printf.eprintf "dev_package\n%!";
       let dir = OpamPath.dev_package t.root nv in
       extract_and_copy_files nv (OpamState.download_upstream t nv dir);
       None

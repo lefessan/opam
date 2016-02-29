@@ -46,7 +46,22 @@ let init  t = t / "opam-init"
 
 let log t = t / "log"
 
-let download_cache t = t / "download-cache"
+
+let download_cache =
+  try
+    let dir = Sys.getenv "OPAM_DOWNLOAD_CACHE" in
+    if not (Sys.file_exists dir) then begin
+        Printf.eprintf
+          "Fatal error: OPAM_DOWNLAD_CACHE is set to non-existent directory:\n";
+        Printf.eprintf
+          "   %S\n";
+        Printf.eprintf "Aborting.\n%!";
+        exit 2
+      end;
+    let dir = OpamFilename.Dir.of_string dir in
+    function _ -> dir
+  with Not_found ->
+    function t -> t / "download-cache"
 
 let backup_file =
   let file = lazy Unix.(

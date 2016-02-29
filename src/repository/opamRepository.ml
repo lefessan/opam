@@ -196,12 +196,13 @@ let rec pull_from_mirrors label ?working_dir cache_dir destdir checksums = funct
   | [] -> invalid_arg "pull_from_mirrors: empty mirror list"
   | [url] ->
     pull_from_upstream label ?working_dir cache_dir destdir checksums url
-  | url::mirrors ->
+  | url:: (mirror :: _ as mirrors) ->
     pull_from_upstream label ?working_dir cache_dir destdir checksums url
     @@+ function
     | Not_available s ->
-      OpamConsole.warning "%s: download of %s failed (%s), trying mirror"
-        label (OpamUrl.to_string url) s;
+      OpamConsole.warning "%s: download of %s failed (%s), trying mirror %s"
+        label (OpamUrl.to_string url) s
+          (OpamUrl.to_string mirror);
       pull_from_mirrors label cache_dir destdir checksums mirrors
     | r -> Done r
 

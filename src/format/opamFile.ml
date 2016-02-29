@@ -23,6 +23,8 @@ open OpamTypes
 open OpamTypesBase
 open OpamStd.Op
 
+let backup_url_ocamlpro = "http://opam.ocamlpro.com/backup"
+
 module Pp = struct
   include OpamPp
   module V = OpamFormat.V
@@ -1016,7 +1018,7 @@ module ConfigSyntax = struct
     eval_variables : (variable * string list * string) list;
     validation_hook : arg list option;
     default_compiler : formula;
-
+    backup_urls : string list;
   }
 
   let opam_version t = t.opam_version
@@ -1025,6 +1027,7 @@ module ConfigSyntax = struct
   let switch t = t.switch
   let jobs t = t.jobs
   let dl_tool t = t.dl_tool
+  let backup_urls t = t.backup_urls
   let dl_jobs t = t.dl_jobs
   let dl_cache t = OpamStd.Option.default [] t.dl_cache
   let criteria t = t.solver_criteria
@@ -1064,6 +1067,7 @@ module ConfigSyntax = struct
     { t with validation_hook = Some validation_hook}
   let with_validation_hook_opt validation_hook t = { t with validation_hook }
   let with_default_compiler default_compiler t = { t with default_compiler }
+  let with_backup_urls backup_urls t = { t with backup_urls }
 
   let empty = {
     opam_version = OpamVersion.current_nopatch;
@@ -1081,6 +1085,7 @@ module ConfigSyntax = struct
     eval_variables = [];
     validation_hook = None;
     default_compiler = OpamFormula.Empty;
+    backup_urls = [backup_url_ocamlpro];
   }
 
   let fields =
@@ -1126,6 +1131,9 @@ module ConfigSyntax = struct
       "solver-fixup-criteria", Pp.ppacc_opt
         (with_criterion `Fixup) (criterion `Fixup)
         Pp.V.string;
+      "backup-urls", Pp.ppacc
+        with_backup_urls backup_urls
+        (Pp.V.map_list ~depth:1 Pp.V.string);
       "solver", Pp.ppacc_opt
         with_solver solver
         (Pp.V.map_list ~depth:1 Pp.V.arg);
@@ -1222,6 +1230,7 @@ module InitConfigSyntax = struct
   let with_wrappers wrappers t = {t with wrappers}
   let with_global_variables global_variables t = {t with global_variables}
   let with_eval_variables eval_variables t = {t with eval_variables}
+
 
   let criterion kind t =
     try Some (List.assoc kind t.solver_criteria)

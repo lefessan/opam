@@ -503,7 +503,8 @@ module OpamSys = struct
 
   let tty_out = Unix.isatty Unix.stdout
 
-  let default_columns = 80
+  let default_columns =
+    try int_of_string (Sys.getenv "OPAM_COLUMNS") with _ -> 80
 
   let get_terminal_columns () =
     try (* terminfo *)

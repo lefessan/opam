@@ -513,89 +513,542 @@ let remove_package t ?keep_build ?silent nv =
   else
     remove_package_aux t ?keep_build ?silent nv
 
+
+
+
+(***********************************************************************)
+(***********************************************************************)
+(***********************************************************************)
+(***********************************************************************)
+(***********************************************************************)
+(***********************************************************************)
+(***********************************************************************)
+
+
+
+
+let add_depends_from_formulas t depends deps =
+  OpamFormula.fold_left (fun accu (n,_) ->
+    if OpamState.is_name_installed t n then
+      let nv = OpamState.find_installed_package_by_name t n in
+      OpamPackage.to_string nv :: accu
+    else
+      accu
+  ) depends deps
+
+let package_variables t nv =
+    match OpamState.opam_opt t nv with
+  | None ->
+    OpamConsole.warning
+      "No opam file found for package %s. Cannot install."
+      (OpamPackage.to_string nv);
+    exit 2
+  | Some opam ->
+
+  (* Computing all this is useless in most cases. We should probably add
+     a | LS of string Lazy.t to OpamTypes.variable_contents to compute
+     them only when useful. *)
+  let depends = add_depends_from_formulas t []
+      (OpamFile.OPAM.depends opam) in
+  let depopts = add_depends_from_formulas t []
+      (OpamFile.OPAM.depopts opam) in
+  OpamConsole.warning
+    "Package %s: current depends are %s and depopts are %s."
+    (OpamPackage.to_string nv)
+    (String.concat "," depends)
+    (String.concat "," depopts)
+  ;
+  (depends, depopts)
+
+let opam_build = try Some  (Sys.getenv "OPAM_BUILD") with _ -> None
+let be_verbose = opam_build <> None
+
+let verbose_result result =
+  if be_verbose then begin
+    List.iter (Printf.printf "%s\n") result.OpamProcess.r_stdout;
+    List.iter (Printf.eprintf "%s\n") result.OpamProcess.r_stderr;
+  end;
+  ()
+
+let cut_at s c =
+  let pos = String.index s c in
+  String.sub s 0 pos, String.sub s (pos+1) (String.length s - pos - 1)
+
+let digest_package t nv builder_dir =
+  let (depends, depopts) = package_variables t nv in
+  let cache_dir = Filename.concat builder_dir "cache" in
+  let versions =
+    OpamPackage.to_string nv :: depopts @ depends
+  in
+  let versions = List.sort compare versions in
+  let b = Buffer.create 10000 in
+  Buffer.add_string b (OpamSwitch.to_string t.switch);
+  List.iter (fun version_name ->
+    let package_name, _ = cut_at version_name '.' in
+    let package_dir = Filename.concat cache_dir package_name in
+    let version_dir = Filename.concat package_dir version_name in
+    let checksum_file = Filename.concat version_dir "checksum.txt" in
+    let ic = open_in checksum_file in
+    let checksum = input_line ic in
+    close_in ic;
+    Buffer.add_string b version_name;
+    Buffer.add_string b checksum;
+  ) versions;
+  Digest.string (Buffer.contents b)
+
+module StringSet = Set.Make(String)
+
+
+module Snapshot : sig
+
+  type t = {
+    files : (string * kind) list;
+  }
+  and kind =
+    | File of file
+    | Dir of t
+    | Link of string
+  and file = {
+    file_size : int;
+    file_mtime : float;
+  }
+
+  val make : string -> (* ignored_files *) StringSet.t -> t
+  val save : string -> t -> unit
+  val load : string -> t
+  val diff : (* after *) t -> (* before *) t -> t
+
+  val copy_files : (* src_dir *) string -> t -> (* dst_dir *) string -> unit
+  val remove_files : string -> t -> unit
+
+end  = struct
+
+  type t = {
+    files : (string * kind) list;
+  }
+  and kind =
+    | File of file
+    | Dir of t
+    | Link of string
+  and file = {
+    file_size : int;
+    file_mtime : float;
+  }
+
+  let rec make dir base ignored =
+    let files = Sys.readdir dir in Array.sort compare files;
+    let snapshot_files = ref [] in
+    Array.iter (fun file ->
+      if not (StringSet.mem (Filename.concat base file) ignored) then
+        let kind =
+          let filename = Filename.concat dir file in
+          let st = Unix.lstat filename in
+          match st.Unix.st_kind with
+          | Unix.S_REG ->
+            File {
+              file_size = st.Unix.st_size;
+              file_mtime = st.Unix.st_mtime;
+            }
+          | Unix.S_DIR ->
+            Dir (make filename (Filename.concat base file) ignored)
+          | Unix.S_LNK ->
+            let link = Unix.readlink filename in
+            Link link
+          | _ -> assert false (* TODO: better message *)
+        in
+        snapshot_files := (file, kind) :: !snapshot_files
+      ) files;
+    { files = List.rev !snapshot_files }
+
+  let make dir ignored = make dir "." ignored
+
+  let save filename t =
+    let oc = open_out filename in
+    let rec save t =
+      List.iter (fun (file, kind) ->
+        match kind with
+        | Link link ->
+          Printf.fprintf oc "LINK\n%s\n" file;
+          Printf.fprintf oc "%s\n" link;
+        | Dir t ->
+          Printf.fprintf oc "DIR\n%s\n" file;
+          save t;
+        | File f ->
+          Printf.fprintf oc "FILE\n%s\n" file;
+          Printf.fprintf oc "%d\n" f.file_size;
+          Printf.fprintf oc "%f\n" f.file_mtime;
+      ) t.files;
+      Printf.fprintf oc "END\n";
+    in
+    save t;
+    close_out oc
+
+  let lines_of_file filename =
+    let ic = open_in filename in
+    let lines = ref [] in
+    try
+      while true do
+        lines := (input_line ic) :: !lines
+      done;
+      assert false
+    with _ ->
+      close_in ic;
+      List.rev !lines
+
+  let load filename =
+    let lines = lines_of_file filename in
+    let rec load lines files =
+      match lines with
+      | "END" :: rem ->
+        { files = List.rev files }, rem
+      | "LINK" :: file :: link :: rem ->
+        load rem ( (file, Link link) :: files )
+      | "DIR" :: file :: rem ->
+        let t, rem = load rem [] in
+        load rem ( (file, Dir t) :: files )
+      | "FILE" :: file :: file_size :: file_mtime :: rem ->
+        let f = {
+          file_size = int_of_string file_size;
+          file_mtime = float_of_string file_mtime;
+        } in
+        load rem ( (file, File f) :: files )
+      | _ -> assert false
+    in
+    let t,rem = load lines [] in
+    assert (rem = []);
+    t
+
+  (* For now, we only support adding files, not removing them ! *)
+  let diff after before = (* TODO *)
+    let rec diff_files after before files =
+      match after, before with
+      | _, [] -> List.rev files @ after
+      | [], _ :: _ -> assert false (* TODO : better error message *)
+      | (file1, kind1) :: after1,
+        (file2, kind2) :: before2 ->
+        if file1 < file2 then
+          diff_files after1 before ( (file1, kind1) :: files )
+        else
+        if file1 = file2 then
+          let files =
+            match kind1, kind2 with
+            | File f1, File f2 ->
+              if f1 <> f2 then (file1, kind1) :: files
+              else files
+            | Dir { files = files1 }, Dir { files = files2 } ->
+              let diff = diff_files files1 files2 [] in
+              if diff <> [] then
+                (file1, Dir { files = diff } ) :: files
+              else files
+
+            | Link link1, Link link2 ->
+              (* TODO: check that tar can change links *)
+              if link1 <> link2 then (file1, kind1) :: files
+              else files
+
+            | _ -> assert false (* TODO: better error message *)
+          in
+          diff_files after1 before2 files
+        else
+          assert false (* file1 > file2 : TODO : better error message *)
+    in
+    { files = diff_files after.files before.files [] }
+
+  let rec copy_files prefix snap destdir =
+    List.iter (fun (file, kind) ->
+      let src_file = Filename.concat prefix file in
+      let dst_file = Filename.concat destdir file in
+      match kind with
+      | Link link ->
+        if Filename.is_relative link then
+          Unix.symlink link dst_file
+        else assert false
+      | Dir snap ->
+        Unix.mkdir dst_file 0o755; (* TODO: add perms in snapshots *)
+        copy_files src_file snap dst_file
+      | File f ->
+        let exit =  (* call cp for now, because it keeps perms *)
+          Printf.kprintf Sys.command "cp '%s' '%s'" src_file dst_file
+        in
+        assert (exit = 0);
+(*
+        let s = File.string_of_file src_file in
+        File.file_of_string dst_file s  (* TODO: add perms in snapshots *)
+*)
+    ) snap.files
+
+  let rec remove_files prefix snap =
+    List.iter (fun (file, kind) ->
+      let src_file = Filename.concat prefix file in
+      match kind with
+      | Link _
+      | File _ ->
+        Sys.remove src_file
+      | Dir snap ->
+        remove_files src_file snap;
+        (try Unix.rmdir src_file with _ -> ())
+    ) snap.files
+
+end
+
+
+(* TODO: we should have an option for every system. Ideally,
+   opam should not build in the same directory as prefix ! *)
+  let opam_ignored_files =
+    let set = ref StringSet.empty in
+    List.iter (fun file ->
+      set := StringSet.add file !set
+    ) [
+      "./backup"; "./build"; "./config";
+      "./install"; "./overlay"; "./packages.dev";
+      "./installed"; "./installed_roots"; "./state"; "./environment";
+      "./reinstall"; "./pinned";
+    ];
+    !set
+
+let snapshot_opam_switch switch_dir =
+  Snapshot.make switch_dir opam_ignored_files
+
+type install_kind =
+| StdOpam (* opam operating normally *)
+| HasSnapshot of string * string * Snapshot.t * string
+| HasArchive of string * string
+
+let install_kind = ref StdOpam
+
+
+
+let should_build_package t nv =
+  match opam_build with
+  | None -> true
+  | Some builder_dir ->
+      let package_hash = digest_package t nv builder_dir in
+      let cache_dir = Filename.concat builder_dir "cache" in
+      let version_name = OpamPackage.to_string nv in
+      let package_name, _ = cut_at version_name '.' in
+      let package_dir = Filename.concat cache_dir package_name in
+      let version_dir = Filename.concat package_dir version_name in
+      let archive_file =
+        Filename.concat version_dir
+          (Printf.sprintf "%s-%s.tar.gz"
+             (Digest.to_hex package_hash)
+             (OpamSwitch.to_string t.switch))
+      in
+      let switch_dir = OpamPath.Switch.root t.root t.switch in
+      let switch_dir = OpamFilename.Dir.to_string switch_dir in
+      if not (Sys.file_exists archive_file) then begin
+        Printf.eprintf "Snapshotting %s...\n%!" switch_dir;
+        let sn = Snapshot.make switch_dir opam_ignored_files in
+        Printf.eprintf "Snapshotting %s...done\n%!" switch_dir;
+        assert (!install_kind = StdOpam);
+        install_kind := HasSnapshot (package_hash, switch_dir, sn, archive_file);
+        true
+      end else begin
+        assert (!install_kind = StdOpam);
+        install_kind := HasArchive (switch_dir, archive_file);
+        false
+      end
+
+        (*
+let has_built_package t nv job_result =
+  begin
+    match job_result with
+    | Done None -> () (* Success, nothing to do. *)
+    | _ ->
+      match !install_kind with
+      | StdOpam -> ()
+      | HasArchive _ -> assert false
+      | HasSnapshot (package_hash, switch_dir, sn, _) ->
+  (* Something wrong happened, use the snapshot to clean everything. *)
+        install_kind := StdOpam;
+        Printf.eprintf "Build failed. Snapshot found. Using it to clean files...\n%!";
+        Snapshot.remove_files switch_dir sn;
+  end;
+  job_result
+        *)
+
+let should_install_package t nv =
+  match !install_kind with
+  | StdOpam -> true
+  | HasSnapshot (package_hash, switch_dir, sn, _) -> true
+  | HasArchive (switch_dir, archive_file) ->
+    let current_dir = Sys.getcwd () in
+    Unix.chdir switch_dir;
+    Printf.eprintf "Extracting archive %s\n%!" archive_file;
+    let exitcode = Printf.kprintf Sys.command "tar zxf %s" archive_file in
+    Unix.chdir current_dir;
+    if exitcode <> 0 then begin
+      Printf.eprintf "Error while extracting archive content in %s\n%!"
+        switch_dir;
+      exit 2
+    end;
+    install_kind := StdOpam;
+    false
+
+let has_installed_package t nv result =
+  Printf.eprintf "has_installed_package...\n\n\n%!";
+  match result with
+  | Some exn ->
+    begin
+      match !install_kind with
+      | StdOpam -> ()
+      | HasArchive _ -> assert false
+      | HasSnapshot (package_hash, switch_dir, sn, _) ->
+        (* Something wrong happened, use the snapshot to clean everything. *)
+        install_kind := StdOpam;
+        Printf.eprintf "Build failed. Snapshot found. Using it to clean files...\n%!";
+        Snapshot.remove_files switch_dir sn;
+    end;
+    Done (Some exn)
+
+  | None ->
+    match !install_kind with
+    | StdOpam -> Done None
+    | HasArchive _ -> assert false
+    | HasSnapshot (package_hash, switch_dir, sn_before, archive_file) ->
+
+      try
+      Printf.eprintf "Snapshotting %s...\n%!" switch_dir;
+        let sn_after = Snapshot.make switch_dir opam_ignored_files in
+        Printf.eprintf "Snapshotting %s...done\n%!" switch_dir;
+        (* compare snapshot if necessary *)
+        let diff = Snapshot.diff sn_after sn_before in
+        (* build archive with result, and save *)
+
+        (* Build archive *)
+        Printf.eprintf "Building archive...\n%!";
+        let destdir = "_destdir" in
+        ignore (Printf.kprintf Sys.command "rm -rf %s" destdir);
+        (try Sys.remove destdir with _ -> ());
+        Unix.mkdir destdir 0o755;
+        Printf.eprintf "Copying installed files...\n%!";
+        Snapshot.copy_files switch_dir diff destdir;
+        Printf.eprintf "Copying installed files...done\n%!";
+        Unix.chdir destdir;
+        let exit = Printf.kprintf Sys.command "tar zcf %s ." archive_file in
+        assert (exit = 0);
+        Unix.chdir "..";
+        ignore (Printf.kprintf Sys.command "rm -rf %s" destdir);
+        Printf.eprintf "Archive %s done\n\n\n%!" archive_file;
+
+        Done None
+      with exn -> Done (Some exn)
+
+(***********************************************************************)
+(***********************************************************************)
+(***********************************************************************)
+(***********************************************************************)
+(***********************************************************************)
+(***********************************************************************)
+(***********************************************************************)
+
+
+
+
 (* Compiles a package.
    Assumes the package has already been downloaded to [source].
 *)
 let build_package t source nv =
-  extract_package t source nv;
-  let opam = OpamState.opam t nv in
-  let commands =
-    OpamFile.OPAM.build opam @
-    (if OpamStateConfig.(!r.build_test)
-     then OpamFile.OPAM.build_test opam else []) @
-    (if OpamStateConfig.(!r.build_doc)
-     then OpamFile.OPAM.build_doc opam else [])
-  in
-  let commands = OpamFilter.commands (OpamState.filter_env ~opam t) commands in
-  let env = OpamTypesBase.env_array (compilation_env t opam) in
-  let name = OpamPackage.name_to_string nv in
-  let dir = OpamPath.Switch.build t.root t.switch nv in
-  let rec run_commands = function
-    | (cmd::args)::commands ->
-      let text = OpamProcess.make_command_text name ~args cmd in
-      let dir = OpamFilename.Dir.to_string dir in
-      OpamSystem.make_command ~env ~name ~dir ~text
-        ~verbose:(OpamConsole.verbose ()) ~check_existence:false
-        cmd args
-      @@> fun result ->
-      if OpamProcess.is_success result then
-        run_commands commands
-      else
-        (OpamConsole.error
-           "The compilation of %s failed at %S."
-           name (String.concat " " (cmd::args));
-         (* FIXME: this shouldn't be needed, but lots of packages still install
-            during this step, so make sure to cleanup *)
-         remove_package t ~keep_build:true ~silent:true nv @@+ fun () ->
-         Done (Some (OpamSystem.Process_error result)))
-    | []::commands -> run_commands commands
-    | [] -> Done None
-  in
-  run_commands commands
+  Printf.eprintf "\n\n\nbuild_package %s\n\n\n%!" (OpamPackage.to_string nv);
+
+
+  if should_build_package t nv then begin
+    extract_package t source nv;
+    let opam = OpamState.opam t nv in
+    let commands =
+      OpamFile.OPAM.build opam @
+        (if OpamStateConfig.(!r.build_test)
+         then OpamFile.OPAM.build_test opam else []) @
+        (if OpamStateConfig.(!r.build_doc)
+         then OpamFile.OPAM.build_doc opam else [])
+    in
+    let commands = OpamFilter.commands (OpamState.filter_env ~opam t) commands in
+    let env = OpamTypesBase.env_array (compilation_env t opam) in
+    let name = OpamPackage.name_to_string nv in
+    let dir = OpamPath.Switch.build t.root t.switch nv in
+    let rec run_commands = function
+      | (cmd::args)::commands ->
+        let text = OpamProcess.make_command_text name ~args cmd in
+        let dir = OpamFilename.Dir.to_string dir in
+        OpamSystem.make_command ~env ~name ~dir ~text
+          ~verbose:(OpamConsole.verbose ()) ~check_existence:false
+          cmd args
+        @@> fun result ->
+          verbose_result result;
+          if OpamProcess.is_success result then
+            run_commands commands
+          else
+            (OpamConsole.error
+               "The compilation of %s failed at %S."
+               name (String.concat " " (cmd::args));
+           (* FIXME: this shouldn't be needed, but lots of packages still install
+              during this step, so make sure to cleanup *)
+             remove_package t ~keep_build:true ~silent:true nv @@+ fun () ->
+               Done (Some (OpamSystem.Process_error result)))
+      | []::commands -> run_commands commands
+      | [] -> Done None
+    in
+    run_commands commands
+  end else Done None
 
 (* Assumes the package has already been compiled in its build dir.
    Does not register the installation in the metadata ! *)
 let install_package t nv =
-  let opam = OpamState.opam t nv in
-  let commands = OpamFile.OPAM.install opam in
-  let commands = OpamFilter.commands (OpamState.filter_env ~opam t) commands in
-  let env = OpamTypesBase.env_array (compilation_env t opam) in
-  let name = OpamPackage.name_to_string nv in
-  let dir = OpamPath.Switch.build t.root t.switch nv in
-  let rec run_commands = function
-    | (cmd::args)::commands ->
-      let text = OpamProcess.make_command_text name ~args cmd in
-      let dir = OpamFilename.Dir.to_string dir in
-      OpamSystem.make_command ~env ~name ~dir ~text
-        ~verbose:(OpamConsole.verbose ()) ~check_existence:false
-        cmd args
-      @@> fun result ->
-      if OpamFile.OPAM.has_flag Pkgflag_Verbose opam then
-        List.iter (OpamConsole.msg "%s\n") result.OpamProcess.r_stdout;
-      if OpamProcess.is_success result then
-        run_commands commands
-      else (
-        OpamConsole.error
-          "The installation of %s failed at %S."
-          name (String.concat " " (cmd::args));
-        remove_package t ~keep_build:true ~silent:true nv
-        @@| fun () -> Some (OpamSystem.Process_error result)
-      )
-    | []::commands -> run_commands commands
-    | [] -> Done None
+  Printf.eprintf "\n\n\ninstall_package %s\n\n\n%!" (OpamPackage.to_string nv);
+  let install_job =
+    if should_install_package t nv then
+    let job_result =
+      let opam = OpamState.opam t nv in
+      let commands = OpamFile.OPAM.install opam in
+      let commands = OpamFilter.commands (OpamState.filter_env ~opam t) commands in
+      let env = OpamTypesBase.env_array (compilation_env t opam) in
+      let name = OpamPackage.name_to_string nv in
+      let dir = OpamPath.Switch.build t.root t.switch nv in
+      let rec run_commands = function
+        | (cmd::args)::commands ->
+          let text = OpamProcess.make_command_text name ~args cmd in
+          let dir = OpamFilename.Dir.to_string dir in
+          OpamSystem.make_command ~env ~name ~dir ~text
+            ~verbose:(OpamConsole.verbose ()) ~check_existence:false
+            cmd args
+          @@> fun result ->
+            verbose_result result;
+            if OpamFile.OPAM.has_flag Pkgflag_Verbose opam then
+              List.iter (OpamConsole.msg "%s\n") result.OpamProcess.r_stdout;
+            if OpamProcess.is_success result then
+              run_commands commands
+            else (
+              OpamConsole.error
+                "The installation of %s failed at %S."
+                name (String.concat " " (cmd::args));
+              remove_package t ~keep_build:true ~silent:true nv
+              @@| fun () -> Some (OpamSystem.Process_error result)
+            )
+        | []::commands -> run_commands commands
+        | [] -> Done None
+      in
+      run_commands commands @@+ function
+      | Some _ as err -> Done err
+      | None ->
+        try
+          process_dot_install t nv;
+          Done None
+        with e ->
+          remove_package t ~keep_build:true ~silent:true nv
+          @@| fun () -> OpamStd.Exn.fatal e; Some e
+    in
+    job_result @@+ has_installed_package t nv
+  else
+    Done None
   in
-  run_commands commands @@+ function
-  | Some _ as err -> Done err
+  install_job @@+ function
   | None ->
-    try
-      process_dot_install t nv;
-      OpamConsole.msg "%s installed %s.%s\n"
-        (if not (OpamConsole.utf8 ()) then "->"
-         else OpamActionGraph.
-                (action_color (`Install ()) (action_strings (`Install ()))))
-        (OpamConsole.colorise `bold name)
-        (OpamPackage.version_to_string nv);
-      Done None
-    with e ->
-      remove_package t ~keep_build:true ~silent:true nv
-      @@| fun () -> OpamStd.Exn.fatal e; Some e
+    let name = OpamPackage.name_to_string nv in
+    OpamConsole.msg "%s installed %s.%s\n"
+      (if not (OpamConsole.utf8 ()) then "->"
+       else OpamActionGraph.
+          (action_color (`Install ()) (action_strings (`Install ()))))
+      (OpamConsole.colorise `bold name)
+      (OpamPackage.version_to_string nv);
+    Done None
+  | Some exn -> Done (Some exn)

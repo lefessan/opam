@@ -526,76 +526,6 @@ let remove_package t ?keep_build ?silent nv =
 
 
 
-
-let add_depends_from_formulas t depends deps =
-  OpamFormula.fold_left (fun accu (n,_) ->
-    if OpamState.is_name_installed t n then
-      let nv = OpamState.find_installed_package_by_name t n in
-      OpamPackage.to_string nv :: accu
-    else
-      accu
-  ) depends deps
-
-let package_variables t nv =
-  match OpamState.opam_opt t nv with
-  | None ->
-    OpamConsole.warning
-      "No opam file found for package %s. Cannot install."
-      (OpamPackage.to_string nv);
-    exit 2
-  | Some opam ->
-
-  (* Computing all this is useless in most cases. We should probably add
-     a | LS of string Lazy.t to OpamTypes.variable_contents to compute
-     them only when useful. *)
-    let depends = add_depends_from_formulas t []
-      (OpamFile.OPAM.depends opam) in
-    let depopts = add_depends_from_formulas t []
-      (OpamFile.OPAM.depopts opam) in
-    OpamConsole.warning
-      "Package %s: current depends are %s and depopts are %s."
-      (OpamPackage.to_string nv)
-      (String.concat "," depends)
-      (String.concat "," depopts)
-    ;
-    (depends, depopts)
-
-let opam_build = try Some  (Sys.getenv "OPAM_BUILD") with _ -> None
-let be_verbose = opam_build <> None
-
-let verbose_result result =
-  if be_verbose then begin
-    List.iter (Printf.printf "%s\n") result.OpamProcess.r_stdout;
-    List.iter (Printf.eprintf "%s\n") result.OpamProcess.r_stderr;
-  end;
-  ()
-
-let cut_at s c =
-  let pos = String.index s c in
-  String.sub s 0 pos, String.sub s (pos+1) (String.length s - pos - 1)
-
-let digest_package t nv builder_dir =
-  let (depends, depopts) = package_variables t nv in
-  let cache_dir = Filename.concat builder_dir "cache" in
-  let versions =
-    OpamPackage.to_string nv :: depopts @ depends
-  in
-  let versions = List.sort compare versions in
-  let b = Buffer.create 10000 in
-  Buffer.add_string b (OpamSwitch.to_string t.switch);
-  List.iter (fun version_name ->
-    let package_name, _ = cut_at version_name '.' in
-    let package_dir = Filename.concat cache_dir package_name in
-    let version_dir = Filename.concat package_dir version_name in
-    let checksum_file = Filename.concat version_dir "checksum.txt" in
-    let ic = open_in checksum_file in
-    let checksum = input_line ic in
-    close_in ic;
-    Buffer.add_string b version_name;
-    Buffer.add_string b checksum;
-  ) versions;
-  Digest.string (Buffer.contents b)
-
 module StringSet = Set.Make(String)
 
 
@@ -792,6 +722,81 @@ end  = struct
 end
 
 
+
+let add_depends_from_formulas t depends deps =
+  OpamFormula.fold_left (fun accu (n,_) ->
+    if OpamState.is_name_installed t n then
+      let nv = OpamState.find_installed_package_by_name t n in
+      OpamPackage.to_string nv :: accu
+    else
+      accu
+  ) depends deps
+
+let package_variables t nv =
+  match OpamState.opam_opt t nv with
+  | None ->
+    OpamConsole.warning
+      "No opam file found for package %s. Cannot install."
+      (OpamPackage.to_string nv);
+    exit 2
+  | Some opam ->
+
+  (* Computing all this is useless in most cases. We should probably add
+     a | LS of string Lazy.t to OpamTypes.variable_contents to compute
+     them only when useful. *)
+    let depends = add_depends_from_formulas t []
+      (OpamFile.OPAM.depends opam) in
+    let depopts = add_depends_from_formulas t []
+      (OpamFile.OPAM.depopts opam) in
+    OpamConsole.warning
+      "Package %s: current depends are %s and depopts are %s."
+      (OpamPackage.to_string nv)
+      (String.concat "," depends)
+      (String.concat "," depopts)
+    ;
+    (depends, depopts)
+
+let opam_build =
+  try let build_dir = Sys.getenv "OPAM_BUILD" in
+      let oc = open_out (Filename.concat build_dir "builder.txt") in
+      Some (oc, build_dir)
+  with _ -> None
+let be_verbose = opam_build <> None
+
+let verbose_result result =
+  if be_verbose then begin
+    List.iter (Printf.printf "%s\n") result.OpamProcess.r_stdout;
+    List.iter (Printf.eprintf "%s\n") result.OpamProcess.r_stderr;
+  end;
+  ()
+
+let cut_at s c =
+  let pos = String.index s c in
+  String.sub s 0 pos, String.sub s (pos+1) (String.length s - pos - 1)
+
+let digest_package t nv builder_dir =
+  let (depends, depopts) = package_variables t nv in
+  let cache_dir = Filename.concat builder_dir "cache" in
+  let versions =
+    OpamPackage.to_string nv :: depopts @ depends
+  in
+  let versions = List.sort compare versions in
+  let b = Buffer.create 10000 in
+  Buffer.add_string b (OpamSwitch.to_string t.switch);
+  List.iter (fun version_name ->
+    let package_name, _ = cut_at version_name '.' in
+    let package_dir = Filename.concat cache_dir package_name in
+    let version_dir = Filename.concat package_dir version_name in
+    let checksum_file = Filename.concat version_dir
+      (version_name ^ ".lint.checksum") in
+    let ic = open_in checksum_file in
+    let checksum = input_line ic in
+    close_in ic;
+    Buffer.add_string b version_name;
+    Buffer.add_string b checksum;
+  ) versions;
+  Digest.string (Buffer.contents b)
+
   (* TODO: we should have an option for every system. Ideally,
      opam should not build in the same directory as prefix ! *)
 let opam_ignored_files =
@@ -815,23 +820,30 @@ type action_kind =
 let cache_package_action kind t nv create_job =
   match opam_build with
   | None -> create_job t nv
-  | Some builder_dir ->
-    let package_hash = digest_package t nv builder_dir in
-    let cache_dir = Filename.concat builder_dir "cache" in
+  | Some (build_oc, builder_dir) ->
+    let kind_string = match kind with
+      | BuildAction -> "build"
+      | InstallAction -> "install" in
     let version_name = OpamPackage.to_string nv in
+    let version_hash = Digest.to_hex (digest_package t nv builder_dir) in
+    Printf.fprintf build_oc "hash:%s:%s:%s\n%!" kind_string version_hash version_name;
+
+    let cache_dir = Filename.concat builder_dir "cache" in
     let package_name, _ = cut_at version_name '.' in
     let package_dir = Filename.concat cache_dir package_name in
     let version_dir = Filename.concat package_dir version_name in
     let archive_file_prefix =
       Filename.concat version_dir
         (Printf.sprintf "%s-%s"
-           (Digest.to_hex package_hash)
+           version_hash
            (OpamSwitch.to_string t.switch))
     in
     let build_archive_file =
       Printf.sprintf "%s-%s.tar.gz" archive_file_prefix "build" in
     let install_archive_file =
-      Printf.sprintf "%s-%s.tar.gz" archive_file_prefix "build" in
+      Printf.sprintf "%s-%s.tar.gz" archive_file_prefix "install" in
+    let archive_file_prefix =
+      Printf.sprintf "%s-%s" archive_file_prefix kind_string in
     let archive_file =
       match kind with
       | BuildAction -> build_archive_file
@@ -851,7 +863,8 @@ let cache_package_action kind t nv create_job =
       create_job t nv @@+ (fun result ->
         match result with
         | Some exn ->
-              (* Something wrong happened,
+          Printf.fprintf build_oc "%s:failed:%s\n%!" kind_string version_name;
+          (* Something wrong happened,
                  use the snapshot to clean everything. *)
           Printf.eprintf
             "Build failed. Snapshot found. Using it to clean files...\n%!";
@@ -859,7 +872,6 @@ let cache_package_action kind t nv create_job =
           Done (Some exn)
 
         | None ->
-
           try
             Printf.eprintf "Snapshotting %s...\n%!" switch_dir;
             let sn_after = Snapshot.make switch_dir opam_ignored_files in
@@ -876,22 +888,25 @@ let cache_package_action kind t nv create_job =
             Unix.mkdir destdir 0o755;
             Printf.eprintf "Copying installed files...\n%!";
             Snapshot.copy_files switch_dir sn_diff destdir;
-            Snapshot.save (archive_file ^ ".snap") sn_diff;
+            Snapshot.save (archive_file_prefix ^ ".snap") sn_diff;
             Printf.eprintf "Copying installed files...done\n%!";
             Unix.chdir destdir;
             let exit = Printf.kprintf Sys.command "tar zcf %s ." archive_file in
-            assert (exit = 0);
             Unix.chdir "..";
+            assert (exit = 0);
             ignore (Printf.kprintf Sys.command "rm -rf %s" destdir);
             Printf.eprintf "Archive %s done\n\n\n%!" archive_file;
-
+            Printf.fprintf build_oc "%s:created:%s\n%!" kind_string version_name;
             Done None
-          with exn -> Done (Some exn)
+          with exn ->
+            Printf.fprintf build_oc "%s:error:%s\n%!" kind_string version_name;
+            Done (Some exn)
       )
     end else begin
+      Printf.fprintf build_oc "%s:archive:%s\n%!" kind_string version_name;
       let current_dir = Sys.getcwd () in
-      Unix.chdir switch_dir;
       Printf.eprintf "Extracting archive %s\n%!" archive_file;
+      Unix.chdir switch_dir;
       let exitcode = Printf.kprintf Sys.command "tar zxf %s" archive_file in
       Unix.chdir current_dir;
       if exitcode <> 0 then begin

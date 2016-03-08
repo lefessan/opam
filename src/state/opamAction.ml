@@ -545,11 +545,13 @@ module Snapshot : sig
 
   val make : string -> (* ignored_files *) StringSet.t -> t
   val save : string -> t -> unit
-  val load : string -> t
-  val diff : (* after *) t -> (* before *) t -> t
+  (*   val load : string -> t *)
+  val diff : (* after *) t -> (* before *) t -> t * string list
 
   val copy_files : (* src_dir *) string -> t -> (* dst_dir *) string -> unit
-  val remove_files : string -> t -> unit
+(*  val remove_files : string -> t -> unit *)
+
+
 
 end  = struct
 
@@ -613,6 +615,7 @@ end  = struct
     save t;
     close_out oc
 
+      (*
   let lines_of_file filename =
     let ic = open_in filename in
     let lines = ref [] in
@@ -647,42 +650,73 @@ end  = struct
     let t,rem = load lines [] in
     assert (rem = []);
     t
+*)
+
+  let string_of_kind = function
+    | Dir _ -> "directory"
+    | File _ -> "file"
+    | Link lnk -> Printf.sprintf "link(%s)" lnk
 
   (* For now, we only support adding files, not removing them ! *)
   let diff after before = (* TODO *)
-    let rec diff_files after before files =
+
+    let errors = ref [] in
+    let rec diff_files dirname after before files =
       match after, before with
       | _, [] -> List.rev files @ after
-      | [], _ :: _ -> assert false (* TODO : better error message *)
+      | [], (file2, _) :: before ->
+        errors :=
+          Printf.sprintf "removed-file:%s"
+          (Filename.concat dirname file2) :: !errors;
+        diff_files dirname after before files
       | (file1, kind1) :: after1,
         (file2, kind2) :: before2 ->
         if file1 < file2 then
-          diff_files after1 before ( (file1, kind1) :: files )
+          diff_files dirname after1 before ( (file1, kind1) :: files )
         else
           if file1 = file2 then
             let files =
               match kind1, kind2 with
               | File f1, File f2 ->
-                if f1 <> f2 then (file1, kind1) :: files
-                else files
+                if f1 <> f2 then begin
+                  errors :=
+                    Printf.sprintf "modified-file:%s"
+                    (Filename.concat dirname file2) :: !errors;
+                  (file1, kind1) :: files
+                end else files
               | Dir { files = files1 }, Dir { files = files2 } ->
-                let diff = diff_files files1 files2 [] in
+                let dirname = Filename.concat dirname file1 in
+                let diff = diff_files dirname files1 files2 [] in
                 if diff <> [] then
                   (file1, Dir { files = diff } ) :: files
                 else files
 
               | Link link1, Link link2 ->
               (* TODO: check that tar can change links *)
-                if link1 <> link2 then (file1, kind1) :: files
-                else files
+                if link1 <> link2 then begin
+                  errors :=
+                    Printf.sprintf "modified-link:%s"
+                    (Filename.concat dirname file2) :: !errors;
+                  (file1, kind1) :: files
+                end else files
 
-              | _ -> assert false (* TODO: better error message *)
+              | _ ->
+                errors :=
+                  Printf.sprintf "old:%s" (string_of_kind kind2) ::
+                  Printf.sprintf "new: %s" (string_of_kind kind1) ::
+                  Printf.sprintf "modified-kind:%s"
+                  (Filename.concat dirname file2) :: !errors;
+                (file1, kind1) :: files
             in
-            diff_files after1 before2 files
-          else
-            assert false (* file1 > file2 : TODO : better error message *)
+            diff_files dirname after1 before2 files
+          else begin
+            errors :=
+              Printf.sprintf "removed-file:%s"
+              (Filename.concat dirname file2) :: !errors;
+            diff_files dirname after before2 files
+          end
     in
-    { files = diff_files after.files before.files [] }
+    { files = diff_files "." after.files before.files [] }, !errors
 
   let rec copy_files prefix snap destdir =
     List.iter (fun (file, kind) ->
@@ -707,6 +741,7 @@ end  = struct
     *)
     ) snap.files
 
+      (*
   let rec remove_files prefix snap =
     List.iter (fun (file, kind) ->
       let src_file = Filename.concat prefix file in
@@ -718,19 +753,22 @@ end  = struct
         remove_files src_file snap;
         (try Unix.rmdir src_file with _ -> ())
     ) snap.files
-
+      *)
 end
 
 
 
 let add_depends_from_formulas t depends deps =
-  OpamFormula.fold_left (fun accu (n,_) ->
-    if OpamState.is_name_installed t n then
-      let nv = OpamState.find_installed_package_by_name t n in
-      OpamPackage.to_string nv :: accu
-    else
-      accu
-  ) depends deps
+  let depends =
+    OpamFormula.fold_left (fun accu (n,_) ->
+      if OpamState.is_name_installed t n then
+        let nv = OpamState.find_installed_package_by_name t n in
+        OpamPackage.to_string nv :: accu
+      else
+        accu
+    ) depends deps
+  in
+  List.sort compare depends
 
 let package_variables t nv =
   match OpamState.opam_opt t nv with
@@ -774,9 +812,7 @@ let cut_at s c =
   let pos = String.index s c in
   String.sub s 0 pos, String.sub s (pos+1) (String.length s - pos - 1)
 
-let digest_package t nv builder_dir =
-  let (depends, depopts) = package_variables t nv in
-  let cache_dir = Filename.concat builder_dir "cache" in
+let digest_package t nv cache_dir depends depopts =
   let versions =
     OpamPackage.to_string nv :: depopts @ depends
   in
@@ -795,7 +831,7 @@ let digest_package t nv builder_dir =
     Buffer.add_string b version_name;
     Buffer.add_string b checksum;
   ) versions;
-  Digest.string (Buffer.contents b)
+  Digest.to_hex (Digest.string (Buffer.contents b))
 
   (* TODO: we should have an option for every system. Ideally,
      opam should not build in the same directory as prefix ! *)
@@ -811,24 +847,34 @@ let opam_ignored_files =
   ];
   !set
 
-let snapshot_opam_switch switch_dir =
-  Snapshot.make switch_dir opam_ignored_files
-
 type action_kind =
   BuildAction | InstallAction
+
+(* Changing the type of a file is bad. Maybe we should just fail on it ? *)
+
+let begin_action build_oc kind_string version_name =
+  let t0 = Unix.gettimeofday () in
+  Printf.fprintf build_oc "begin:%s:%.1f:%s\n%!" kind_string t0 version_name;
+  t0
+
+let end_action build_oc kind_string version_name =
+  let t1 = Unix.gettimeofday () in
+  Printf.fprintf build_oc "end:%s:%.1f:%s\n%!" kind_string t1 version_name
 
 let cache_package_action kind t nv create_job =
   match opam_build with
   | None -> create_job t nv
-  | Some (build_oc, builder_dir) ->
+  | Some (build_oc, cache_dir) ->
     let kind_string = match kind with
       | BuildAction -> "build"
       | InstallAction -> "install" in
     let version_name = OpamPackage.to_string nv in
-    let version_hash = Digest.to_hex (digest_package t nv builder_dir) in
-    Printf.fprintf build_oc "hash:%s:%s:%s\n%!" kind_string version_hash version_name;
+    let t0 = begin_action build_oc kind_string version_name in
 
-    let cache_dir = Filename.concat builder_dir "cache" in
+    let (depends, depopts) = package_variables t nv in
+    let version_hash = digest_package t nv cache_dir depends depopts in
+    Printf.fprintf build_oc "hash:%s\n%!" version_hash;
+
     let package_name, _ = cut_at version_name '.' in
     let package_dir = Filename.concat cache_dir package_name in
     let version_dir = Filename.concat package_dir version_name in
@@ -851,34 +897,37 @@ let cache_package_action kind t nv create_job =
     in
     let switch_dir = OpamPath.Switch.root t.root t.switch in
     let switch_dir = OpamFilename.Dir.to_string switch_dir in
-    if not (Sys.file_exists archive_file) then begin
+    if not (Sys.file_exists archive_file) ||
+      not (Sys.file_exists install_archive_file)
+    then begin
       begin match kind with
       | InstallAction -> ()
       | BuildAction ->
-        ignore (Printf.kprintf Sys.command "rm -f %s" install_archive_file)
+        ignore (Printf.kprintf Sys.command "rm -f %s" install_archive_file);
+        ignore (Printf.kprintf Sys.command "rm -f %s" build_archive_file);
       end;
       Printf.eprintf "Snapshotting %s...\n%!" switch_dir;
       let sn_before = Snapshot.make switch_dir opam_ignored_files in
       Printf.eprintf "Snapshotting %s...done\n%!" switch_dir;
       create_job t nv @@+ (fun result ->
+        let t1 = Unix.gettimeofday () in
+        let dt = t1 -. t0 in
         match result with
         | Some exn ->
-          Printf.fprintf build_oc "%s:failed:%s\n%!" kind_string version_name;
-          (* Something wrong happened,
-                 use the snapshot to clean everything. *)
-          Printf.eprintf
-            "Build failed. Snapshot found. Using it to clean files...\n%!";
-          Snapshot.remove_files switch_dir sn_before;
+          Printf.fprintf build_oc "action-failed:%.1f\n%!" dt;
+          end_action build_oc kind_string version_name;
           Done (Some exn)
 
         | None ->
           try
-            Printf.eprintf "Snapshotting %s...\n%!" switch_dir;
             let sn_after = Snapshot.make switch_dir opam_ignored_files in
-            Printf.eprintf "Snapshotting %s...done\n%!" switch_dir;
-              (* compare snapshot if necessary *)
-            let sn_diff = Snapshot.diff sn_after sn_before in
+            (* compare snapshot if necessary *)
+            let sn_diff, sn_errors = Snapshot.diff sn_after sn_before in
               (* build archive with result, and save *)
+            List.iter (fun error ->
+              Printf.fprintf build_oc "snap:error:%s\n%!" error
+            ) sn_errors;
+
 
               (* Build archive *)
             Printf.eprintf "Building archive...\n%!";
@@ -888,22 +937,30 @@ let cache_package_action kind t nv create_job =
             Unix.mkdir destdir 0o755;
             Printf.eprintf "Copying installed files...\n%!";
             Snapshot.copy_files switch_dir sn_diff destdir;
-            Snapshot.save (archive_file_prefix ^ ".snap") sn_diff;
-            Printf.eprintf "Copying installed files...done\n%!";
-            Unix.chdir destdir;
-            let exit = Printf.kprintf Sys.command "tar zcf %s ." archive_file in
-            Unix.chdir "..";
-            assert (exit = 0);
-            ignore (Printf.kprintf Sys.command "rm -rf %s" destdir);
-            Printf.eprintf "Archive %s done\n\n\n%!" archive_file;
-            Printf.fprintf build_oc "%s:created:%s\n%!" kind_string version_name;
-            Done None
+              Snapshot.save (archive_file_prefix ^ ".snap") sn_diff;
+              Printf.eprintf "Copying installed files...done\n%!";
+              Unix.chdir destdir;
+              let exit = Printf.kprintf Sys.command "tar zcf %s ." archive_file in
+              Unix.chdir "..";
+              assert (exit = 0);
+              ignore (Printf.kprintf Sys.command "rm -rf %s" destdir);
+              Printf.eprintf "Archive %s done\n\n\n%!" archive_file;
+              let depends_file = archive_file_prefix ^ ".depends" in
+              let oc = open_out depends_file in
+              Printf.fprintf oc "depends:%s\n" (String.concat "," depends);
+              Printf.fprintf oc "depopts:%s\n" (String.concat "," depopts);
+              close_out oc;
+
+              Printf.fprintf build_oc "archive:created:%.1f\n%!" dt ;
+              end_action build_oc kind_string version_name;
+              Done None
           with exn ->
-            Printf.fprintf build_oc "%s:error:%s\n%!" kind_string version_name;
+            Printf.fprintf build_oc "archive:error:%.1f:%s\n%!"
+              dt (Printexc.to_string exn);
+            end_action build_oc kind_string version_name;
             Done (Some exn)
       )
     end else begin
-      Printf.fprintf build_oc "%s:archive:%s\n%!" kind_string version_name;
       let current_dir = Sys.getcwd () in
       Printf.eprintf "Extracting archive %s\n%!" archive_file;
       Unix.chdir switch_dir;
@@ -914,6 +971,8 @@ let cache_package_action kind t nv create_job =
           switch_dir;
         exit 2
       end;
+      Printf.fprintf build_oc "archive:reused\n%!";
+      end_action build_oc kind_string version_name;
       Done None
     end
 

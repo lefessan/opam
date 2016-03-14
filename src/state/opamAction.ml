@@ -528,6 +528,9 @@ let remove_package t ?keep_build ?silent nv =
 
 module StringSet = Set.Make(String)
 
+(* This version is simplified: it does not make the difference between
+   a file and a link, and other special files. It only works because we use
+   'cp -R' and 'tar' for snapshoting. *)
 
 module Snapshot : sig
 
@@ -537,7 +540,6 @@ module Snapshot : sig
   and kind =
   | File of file
   | Dir of t
-  | Link of string
   and file = {
     file_size : int;
     file_mtime : float;
@@ -561,7 +563,6 @@ end  = struct
   and kind =
   | File of file
   | Dir of t
-  | Link of string
   and file = {
     file_size : int;
     file_mtime : float;
@@ -576,17 +577,24 @@ end  = struct
           let filename = Filename.concat dir file in
           let st = Unix.lstat filename in
           match st.Unix.st_kind with
-          | Unix.S_REG ->
+          | Unix.S_DIR ->
+            Dir (make filename (Filename.concat base file) ignored)
+          | Unix.S_REG
+          | Unix.S_LNK
+          | Unix.S_FIFO
+            ->
             File {
               file_size = st.Unix.st_size;
               file_mtime = st.Unix.st_mtime;
             }
-          | Unix.S_DIR ->
-            Dir (make filename (Filename.concat base file) ignored)
-          | Unix.S_LNK ->
-            let link = Unix.readlink filename in
-            Link link
-          | _ -> assert false (* TODO: better message *)
+          | Unix.S_CHR
+          | Unix.S_BLK
+          | Unix.S_SOCK
+            -> (* TODO: emit a warning for these ones *)
+            File {
+              file_size = st.Unix.st_size;
+              file_mtime = st.Unix.st_mtime;
+            }
         in
         snapshot_files := (file, kind) :: !snapshot_files
     ) files;
@@ -599,9 +607,6 @@ end  = struct
     let rec save t =
       List.iter (fun (file, kind) ->
         match kind with
-        | Link link ->
-          Printf.fprintf oc "LINK\n%s\n" file;
-          Printf.fprintf oc "%s\n" link;
         | Dir t ->
           Printf.fprintf oc "DIR\n%s\n" file;
           save t;
@@ -615,47 +620,9 @@ end  = struct
     save t;
     close_out oc
 
-      (*
-  let lines_of_file filename =
-    let ic = open_in filename in
-    let lines = ref [] in
-    try
-      while true do
-        lines := (input_line ic) :: !lines
-      done;
-      assert false
-    with _ ->
-      close_in ic;
-      List.rev !lines
-
-  let load filename =
-    let lines = lines_of_file filename in
-    let rec load lines files =
-      match lines with
-      | "END" :: rem ->
-        { files = List.rev files }, rem
-      | "LINK" :: file :: link :: rem ->
-        load rem ( (file, Link link) :: files )
-      | "DIR" :: file :: rem ->
-        let t, rem = load rem [] in
-        load rem ( (file, Dir t) :: files )
-      | "FILE" :: file :: file_size :: file_mtime :: rem ->
-        let f = {
-          file_size = int_of_string file_size;
-          file_mtime = float_of_string file_mtime;
-        } in
-        load rem ( (file, File f) :: files )
-      | _ -> assert false
-    in
-    let t,rem = load lines [] in
-    assert (rem = []);
-    t
-*)
-
   let string_of_kind = function
     | Dir _ -> "directory"
     | File _ -> "file"
-    | Link lnk -> Printf.sprintf "link(%s)" lnk
 
   (* For now, we only support adding files, not removing them ! *)
   let diff after before = (* TODO *)
@@ -691,15 +658,6 @@ end  = struct
                   (file1, Dir { files = diff } ) :: files
                 else files
 
-              | Link link1, Link link2 ->
-              (* TODO: check that tar can change links *)
-                if link1 <> link2 then begin
-                  errors :=
-                    Printf.sprintf "modified-link:%s"
-                    (Filename.concat dirname file2) :: !errors;
-                  (file1, kind1) :: files
-                end else files
-
               | _ ->
                 errors :=
                   Printf.sprintf "old:%s" (string_of_kind kind2) ::
@@ -723,37 +681,16 @@ end  = struct
       let src_file = Filename.concat prefix file in
       let dst_file = Filename.concat destdir file in
       match kind with
-      | Link link ->
-        if Filename.is_relative link then
-          Unix.symlink link dst_file
-        else assert false
       | Dir snap ->
         Unix.mkdir dst_file 0o755; (* TODO: add perms in snapshots *)
         copy_files src_file snap dst_file
       | File _ ->
         let exit =  (* call cp for now, because it keeps perms *)
-          Printf.kprintf Sys.command "cp '%s' '%s'" src_file dst_file
+          Printf.kprintf Sys.command "cp -R '%s' '%s'" src_file dst_file
         in
         assert (exit = 0);
-    (*
-      let s = File.string_of_file src_file in
-      File.file_of_string dst_file s  (* TODO: add perms in snapshots *)
-    *)
     ) snap.files
 
-      (*
-  let rec remove_files prefix snap =
-    List.iter (fun (file, kind) ->
-      let src_file = Filename.concat prefix file in
-      match kind with
-      | Link _
-      | File _ ->
-        Sys.remove src_file
-      | Dir snap ->
-        remove_files src_file snap;
-        (try Unix.rmdir src_file with _ -> ())
-    ) snap.files
-      *)
 end
 
 
@@ -812,26 +749,35 @@ let cut_at s c =
   let pos = String.index s c in
   String.sub s 0 pos, String.sub s (pos+1) (String.length s - pos - 1)
 
+let checksums = Hashtbl.create 111
+
 let digest_package t nv cache_dir depends depopts =
-  let versions =
-    OpamPackage.to_string nv :: depopts @ depends
-  in
+  let version_name = OpamPackage.to_string nv in
+  let versions = version_name :: depopts @ depends in
   let versions = List.sort compare versions in
   let b = Buffer.create 10000 in
   Buffer.add_string b (OpamSwitch.to_string t.switch);
   List.iter (fun version_name ->
-    let package_name, _ = cut_at version_name '.' in
-    let package_dir = Filename.concat cache_dir package_name in
-    let version_dir = Filename.concat package_dir version_name in
-    let checksum_file = Filename.concat version_dir
-      (version_name ^ ".lint.checksum") in
-    let ic = open_in checksum_file in
-    let checksum = input_line ic in
-    close_in ic;
     Buffer.add_string b version_name;
+    let checksum =
+      try
+        Hashtbl.find checksums version_name
+      with Not_found ->
+        let package_name, _ = cut_at version_name '.' in
+        let package_dir = Filename.concat cache_dir package_name in
+        let version_dir = Filename.concat package_dir version_name in
+        let checksum_file = Filename.concat version_dir
+          (version_name ^ ".lint.checksum") in
+        let ic = open_in checksum_file in
+        let checksum = input_line ic in
+        close_in ic;
+        checksum
+    in
     Buffer.add_string b checksum;
   ) versions;
-  Digest.to_hex (Digest.string (Buffer.contents b))
+  let checksum = Digest.to_hex (Digest.string (Buffer.contents b)) in
+  Hashtbl.add checksums version_name checksum;
+  checksum
 
   (* TODO: we should have an option for every system. Ideally,
      opam should not build in the same directory as prefix ! *)

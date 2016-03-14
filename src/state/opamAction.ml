@@ -751,33 +751,41 @@ let cut_at s c =
 
 let checksums = Hashtbl.create 111
 
+let version_lint_checksum cache_dir version_name =
+  let package_name, _ = cut_at version_name '.' in
+  let package_dir = Filename.concat cache_dir package_name in
+  let version_dir = Filename.concat package_dir version_name in
+  let checksum_file = Filename.concat version_dir
+    (version_name ^ ".lint.checksum") in
+  let ic = open_in checksum_file in
+  let checksum = input_line ic in
+  close_in ic;
+  checksum
+
 let digest_package t nv cache_dir depends depopts =
   let version_name = OpamPackage.to_string nv in
-  let versions = version_name :: depopts @ depends in
-  let versions = List.sort compare versions in
-  let b = Buffer.create 10000 in
-  Buffer.add_string b (OpamSwitch.to_string t.switch);
-  List.iter (fun version_name ->
+  try
+    Hashtbl.find checksums version_name
+  with Not_found ->
+    let versions = depopts @ depends in
+    let versions = List.sort compare versions in
+    let b = Buffer.create 10000 in
+    Buffer.add_string b (OpamSwitch.to_string t.switch);
     Buffer.add_string b version_name;
-    let checksum =
-      try
-        Hashtbl.find checksums version_name
-      with Not_found ->
-        let package_name, _ = cut_at version_name '.' in
-        let package_dir = Filename.concat cache_dir package_name in
-        let version_dir = Filename.concat package_dir version_name in
-        let checksum_file = Filename.concat version_dir
-          (version_name ^ ".lint.checksum") in
-        let ic = open_in checksum_file in
-        let checksum = input_line ic in
-        close_in ic;
-        checksum
-    in
-    Buffer.add_string b checksum;
-  ) versions;
-  let checksum = Digest.to_hex (Digest.string (Buffer.contents b)) in
-  Hashtbl.add checksums version_name checksum;
-  checksum
+    Buffer.add_string b (version_lint_checksum cache_dir version_name);
+    List.iter (fun version_name ->
+      Buffer.add_string b version_name;
+      let checksum =
+        try
+          Hashtbl.find checksums version_name
+        with Not_found ->
+          version_lint_checksum cache_dir version_name
+      in
+      Buffer.add_string b checksum;
+    ) versions;
+    let checksum = Digest.to_hex (Digest.string (Buffer.contents b)) in
+    Hashtbl.add checksums version_name checksum;
+    checksum
 
   (* TODO: we should have an option for every system. Ideally,
      opam should not build in the same directory as prefix ! *)

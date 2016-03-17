@@ -828,6 +828,8 @@ let cache_package_action kind t nv create_job =
     let (depends, depopts) = package_variables t nv in
     let version_hash = digest_package t nv cache_dir depends depopts in
     Printf.fprintf build_oc "hash:%s\n%!" version_hash;
+    Printf.fprintf build_oc "depends:%s\n%!" (String.concat "," depends);
+    Printf.fprintf build_oc "depopts:%s\n%!" (String.concat "," depopts);
 
     let package_name, _ = cut_at version_name '.' in
     let package_dir = Filename.concat cache_dir package_name in

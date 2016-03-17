@@ -1257,7 +1257,6 @@ let lint =
     in
     if OpamFilename.exists opam_f then
       try
-        Printf.eprintf "XXX YYY AAA\n%!";
         let warnings,opam = OpamFile.OPAM.validate_file opam_f in
         let failed =
           List.exists (function _,`Error,_ -> true | _ -> false) warnings

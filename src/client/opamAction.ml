@@ -773,7 +773,9 @@ end  = struct
         copy_files src_file snap dst_file
       | File _ ->
         let exit =  (* call cp for now, because it keeps perms *)
-          Printf.kprintf Sys.command "cp -R '%s' '%s'" src_file dst_file
+          Printf.kprintf Sys.command "cp -R %s %s"
+                         (Filename.quote src_file)
+                         (Filename.quote dst_file)
         in
         assert (exit = 0);
     ) snap.files
@@ -820,10 +822,19 @@ let package_variables t nv =
 
 let opam_build =
   try let build_dir = Sys.getenv "OPAM_BUILD" in
-      let oc = open_out (Filename.concat build_dir "builder.txt") in
-      Some (oc, build_dir)
+      Some (Buffer.create 1000, build_dir)
   with _ -> None
 let be_verbose = opam_build <> None
+
+let _ =
+  at_exit (fun () ->
+      match opam_build with
+      | None -> ()
+      | Some (b, build_dir) ->
+         let oc = open_out (Filename.concat build_dir "builder.txt") in
+         output_string oc (Buffer.contents b);
+         close_out oc
+    )
 
 let verbose_result result =
   if be_verbose then begin
@@ -938,39 +949,38 @@ type action_kind =
 
 (* Changing the type of a file is bad. Maybe we should just fail on it ? *)
 
-let begin_action build_oc kind_string version_name =
+let begin_action build_buf kind_string version_name =
   let t0 = Unix.gettimeofday () in
-  Printf.fprintf build_oc "begin:%s:%.1f:%s\n%!" kind_string t0 version_name;
+  Printf.bprintf build_buf "begin:%s:%.1f:%s\n%!" kind_string t0 version_name;
   t0
 
-let end_action build_oc kind_string version_name =
+let end_action build_buf kind_string version_name =
   let t1 = Unix.gettimeofday () in
-  Printf.fprintf build_oc "end:%s:%.1f:%s\n%!" kind_string t1 version_name
+  Printf.bprintf build_buf "end:%s:%.1f:%s\n%!" kind_string t1 version_name
 
 let cache_package_action kind t nv create_job =
   match opam_build with
   | None -> create_job t nv
-  | Some (build_oc, cache_dir) ->
+  | Some (build_buf, cache_dir) ->
     let kind_string = match kind with
       | BuildAction -> "build"
       | InstallAction -> "install" in
     let version_name = OpamPackage.to_string nv in
-    let t0 = begin_action build_oc kind_string version_name in
+    let t0 = begin_action build_buf kind_string version_name in
 
     let (depends, depopts) = package_variables t nv in
     let version_hash = digest_package t nv cache_dir depends depopts in
-    Printf.fprintf build_oc "hash:%s\n%!" version_hash;
-    Printf.fprintf build_oc "depends:%s\n%!" (String.concat "," depends);
-    Printf.fprintf build_oc "depopts:%s\n%!" (String.concat "," depopts);
+    Printf.bprintf build_buf "hash:%s\n%!" version_hash;
+    Printf.bprintf build_buf "depends:%s\n%!" (String.concat "," depends);
+    Printf.bprintf build_buf "depopts:%s\n%!" (String.concat "," depopts);
 
     let package_name, _ = cut_at version_name '.' in
     let package_dir = Filename.concat cache_dir package_name in
     let version_dir = Filename.concat package_dir version_name in
     let archive_file_prefix =
       Filename.concat version_dir
-        (Printf.sprintf "%s-%s"
-           version_hash
-           (OpamSwitch.to_string t.switch))
+                      (Printf.sprintf "%s-%s" version_hash
+                                      (OpamSwitch.to_string t.switch))
     in
     let build_archive_file =
       Printf.sprintf "%s-%s.tar.gz" archive_file_prefix "build" in
@@ -1003,8 +1013,8 @@ let cache_package_action kind t nv create_job =
         let dt = t1 -. t0 in
         match result with
         | Some exn ->
-          Printf.fprintf build_oc "action-failed:%.1f\n%!" dt;
-          end_action build_oc kind_string version_name;
+          Printf.bprintf build_buf "action-failed:%.1f\n%!" dt;
+          end_action build_buf kind_string version_name;
           Done (Some exn)
 
         | None ->
@@ -1015,7 +1025,7 @@ let cache_package_action kind t nv create_job =
             let sn_diff, sn_errors = Snapshot.diff sn_after sn_before in
               (* build archive with result, and save *)
             List.iter (fun error ->
-              Printf.fprintf build_oc "snap:error:%s\n%!" error
+              Printf.bprintf build_buf "snap:error:%s\n%!" error
             ) sn_errors;
 
 
@@ -1041,13 +1051,13 @@ let cache_package_action kind t nv create_job =
               Printf.fprintf oc "depopts:%s\n" (String.concat "," depopts);
               close_out oc;
 
-              Printf.fprintf build_oc "archive:created:%.1f\n%!" dt ;
-              end_action build_oc kind_string version_name;
+              Printf.bprintf build_buf "archive:created:%.1f\n%!" dt ;
+              end_action build_buf kind_string version_name;
               Done None
           with exn ->
-            Printf.fprintf build_oc "archive:error:%.1f:%s\n%!"
+            Printf.bprintf build_buf "archive:error:%.1f:%s\n%!"
               dt (Printexc.to_string exn);
-            end_action build_oc kind_string version_name;
+            end_action build_buf kind_string version_name;
             Done (Some exn)
       )
     end else begin
@@ -1064,8 +1074,8 @@ let cache_package_action kind t nv create_job =
           switch_dir;
         exit 2
       end;
-      Printf.fprintf build_oc "archive:reused\n%!";
-      end_action build_oc kind_string version_name;
+      Printf.bprintf build_buf "archive:reused\n%!";
+      end_action build_buf kind_string version_name;
       Done None
     end
 
